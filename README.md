@@ -38,5 +38,5 @@ The addon folder name should stay aligned with the `.toc` file setup.
 
 ## License
 
-No public license has been selected yet.
-If this addon is published on GitHub, CurseForge, or WowUp, choose a license intentionally before public release.
+This project is released under the MIT License.
+See [LICENSE](LICENSE).
