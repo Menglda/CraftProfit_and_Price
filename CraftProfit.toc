@@ -1,0 +1,15 @@
+## Interface: 120001
+## Title: |cFF74D06CCraft|rProfit
+## Notes: Manual AH scan, tooltip prices, and profession profit display.
+## Author: Codex
+## Version: 0.1.0
+## SavedVariables: CraftProfitSettings, CraftProfitPriceDB
+## OptionalDeps: Blizzard_AuctionHouseUI, Blizzard_Professions
+## Category: Auctions
+## Category-koKR: 경매
+
+Core.lua
+Pricing.lua
+Scan.lua
+Professions.lua
+AuctionUI.lua
