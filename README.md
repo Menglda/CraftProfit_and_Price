@@ -34,9 +34,8 @@ The addon folder name should stay aligned with the `.toc` file setup.
 
 - This addon uses Blizzard UI APIs only.
 - Auction House scanning is manual, not automatic.
-- No third-party code or assets are bundled from `RECrystallize`.
 
 ## License
 
-This project is released under the MIT License.
+This project is proprietary and released under All Rights Reserved.
 See [LICENSE](LICENSE).

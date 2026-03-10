@@ -1534,12 +1534,6 @@ function ns:SetupCompatibilityAPI()
         return ns:GetPriceForItemID(itemID)
     end
 
-    if not _G.RECrystallize_PriceCheck then
-        _G.RECrystallize_PriceCheck = _G.CraftProfit_PriceCheck
-    end
-    if not _G.RECrystallize_PriceCheckItemID then
-        _G.RECrystallize_PriceCheckItemID = _G.CraftProfit_PriceCheckItemID
-    end
 end
 
 function ns:SetupSlashCommands()
