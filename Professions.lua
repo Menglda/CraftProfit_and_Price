@@ -220,6 +220,14 @@ local function GetNumericValue(value)
     return nil
 end
 
+local function NormalizeQualityIndex(value)
+    value = GetNumericValue(value)
+    if value and value >= 1 and value <= 5 then
+        return value
+    end
+    return nil
+end
+
 local function ReadNumericMember(source, memberName)
     if not source or not memberName then
         return nil
@@ -235,6 +243,578 @@ local function ReadNumericMember(source, memberName)
     end
 
     return GetNumericValue(value)
+end
+
+local function CollectDisplayedQualityCandidates(source)
+    local candidates = {}
+    local queue = {}
+    local seen = {}
+    local directMemberNames = {
+        "recipeInfo",
+        "currentRecipeInfo",
+        "recipeData",
+        "elementData",
+        "data",
+        "node",
+        "outputItem",
+        "operationInfo",
+        "craftingOutputInfo",
+    }
+    local providerMemberNames = {
+        "GetElementData",
+        "GetData",
+        "GetRecipeInfo",
+        "GetCurrentRecipeInfo",
+        "GetOutputItem",
+    }
+
+    local function Enqueue(candidate, depth)
+        if type(candidate) ~= "table" or depth > 2 or seen[candidate] then
+            return
+        end
+        seen[candidate] = true
+        queue[#queue + 1] = {
+            value = candidate,
+            depth = depth,
+        }
+        candidates[#candidates + 1] = candidate
+    end
+
+    Enqueue(source, 0)
+
+    local queueIndex = 1
+    while queueIndex <= #queue do
+        local item = queue[queueIndex]
+        queueIndex = queueIndex + 1
+
+        if item.depth < 2 then
+            for _, memberName in ipairs(directMemberNames) do
+                Enqueue(item.value[memberName], item.depth + 1)
+            end
+
+            for _, memberName in ipairs(providerMemberNames) do
+                local member = item.value[memberName]
+                if type(member) == "function" then
+                    local ok, result = pcall(member, item.value)
+                    if ok then
+                        Enqueue(result, item.depth + 1)
+                    end
+                end
+            end
+        end
+    end
+
+    return candidates
+end
+
+local function FindQualityIndexByQualityID(qualityIDs, qualityID)
+    qualityID = GetNumericValue(qualityID)
+    if type(qualityIDs) ~= "table" or not qualityID then
+        return nil
+    end
+
+    for index = 1, 5 do
+        local candidateID = GetNumericValue(qualityIDs[index])
+        if candidateID and candidateID == qualityID then
+            return index
+        end
+    end
+
+    return nil
+end
+
+local function GetDisplayedQualityFromQualityIDs(source)
+    local candidates = CollectDisplayedQualityCandidates(source)
+    local qualityIDTables = {}
+    local overrideQualityIDs = {}
+
+    for _, candidate in ipairs(candidates) do
+        local qualityIDs = candidate.qualityIDs
+        if type(qualityIDs) == "table" then
+            qualityIDTables[#qualityIDTables + 1] = qualityIDs
+        end
+
+        local overrideQualityID = GetNumericValue(ReadNumericMember(candidate, "GetOutputOverrideQualityID"))
+            or GetNumericValue(ReadNumericMember(candidate, "outputOverrideQualityID"))
+            or GetNumericValue(ReadNumericMember(candidate, "selectedQualityID"))
+            or GetNumericValue(ReadNumericMember(candidate, "currentQualityID"))
+
+        if overrideQualityID then
+            overrideQualityIDs[#overrideQualityIDs + 1] = overrideQualityID
+        end
+    end
+
+    for _, overrideQualityID in ipairs(overrideQualityIDs) do
+        for _, qualityIDs in ipairs(qualityIDTables) do
+            local qualityIndex = FindQualityIndexByQualityID(qualityIDs, overrideQualityID)
+            if qualityIndex then
+                return qualityIndex, "qualityIDs:GetOutputOverrideQualityID"
+            end
+        end
+    end
+
+    return nil
+end
+
+local function GetDisplayedQualityInfo(source)
+    local qualityIndex, origin = GetDisplayedQualityFromQualityIDs(source)
+    if qualityIndex then
+        return qualityIndex, origin
+    end
+
+    local memberNames = {
+        "GetQualityID",
+        "GetOutputQualityID",
+        "GetCraftingQualityID",
+        "GetCurrentQualityID",
+        "GetExpectedQuality",
+        "qualityID",
+        "QualityID",
+        "qualityIndex",
+        "outputQualityID",
+        "outputQuality",
+        "craftingQualityID",
+        "currentQuality",
+        "currentQualityIndex",
+        "currentQualityID",
+        "expectedQuality",
+        "expectedQualityIndex",
+        "displayQuality",
+        "displayQualityIndex",
+    }
+
+    for _, candidate in ipairs(CollectDisplayedQualityCandidates(source)) do
+        for _, memberName in ipairs(memberNames) do
+            local value = NormalizeQualityIndex(ReadNumericMember(candidate, memberName))
+            if value then
+                return value, memberName
+            end
+        end
+    end
+
+    return nil
+end
+
+local function BuildFrameVisualDebugSummary(frame)
+    if type(frame) ~= "table" then
+        return "frame=nil"
+    end
+
+    local parts = {}
+
+    local function AddPart(value)
+        if not value or value == "" or #parts >= 12 then
+            return
+        end
+        parts[#parts + 1] = value
+    end
+
+    local function IsInterestingText(text)
+        if type(text) ~= "string" or text == "" then
+            return false
+        end
+
+        return string.find(text, "★", 1, true) ~= nil
+            or string.find(text, "품질", 1, true) ~= nil
+            or string.find(string.lower(text), "quality", 1, true) ~= nil
+    end
+
+    local function IsInterestingAtlas(atlas)
+        if type(atlas) ~= "string" or atlas == "" then
+            return false
+        end
+
+        local lowerAtlas = string.lower(atlas)
+        return string.find(lowerAtlas, "quality", 1, true) ~= nil
+            or string.find(lowerAtlas, "tier", 1, true) ~= nil
+            or string.find(lowerAtlas, "profession", 1, true) ~= nil
+    end
+
+    local function DescribeRegion(region, prefix)
+        if type(region) ~= "table" or #parts >= 12 then
+            return
+        end
+
+        local objectType = region.GetObjectType and region:GetObjectType() or nil
+        if objectType == "FontString" then
+            local text = region.GetText and region:GetText() or nil
+            if IsInterestingText(text) then
+                AddPart(string.format("%sFont=%s", prefix, text))
+            end
+            return
+        end
+
+        if objectType == "Texture" then
+            local atlas = region.GetAtlas and region:GetAtlas() or nil
+            if IsInterestingAtlas(atlas) then
+                AddPart(string.format("%sAtlas=%s", prefix, atlas))
+                return
+            end
+
+            local texture = region.GetTexture and region:GetTexture() or nil
+            if type(texture) == "string" and IsInterestingAtlas(texture) then
+                AddPart(string.format("%sTexture=%s", prefix, texture))
+            end
+        end
+    end
+
+    if type(frame.GetRegions) == "function" then
+        local regions = { frame:GetRegions() }
+        for index, region in ipairs(regions) do
+            DescribeRegion(region, string.format("region%d:", index))
+            if #parts >= 12 then
+                break
+            end
+        end
+    end
+
+    if #parts < 12 and type(frame.GetChildren) == "function" then
+        local children = { frame:GetChildren() }
+        for childIndex, child in ipairs(children) do
+            if type(child) == "table" and type(child.GetRegions) == "function" then
+                local childRegions = { child:GetRegions() }
+                for regionIndex, region in ipairs(childRegions) do
+                    DescribeRegion(region, string.format("child%dregion%d:", childIndex, regionIndex))
+                    if #parts >= 12 then
+                        break
+                    end
+                end
+            end
+
+            if #parts >= 12 then
+                break
+            end
+        end
+    end
+
+    if #parts == 0 then
+        return "no-visual-quality-markers"
+    end
+
+    return table.concat(parts, " | ")
+end
+
+local function FormatDebugArrayCompact(values, prefix)
+    if type(values) ~= "table" then
+        return nil
+    end
+
+    local parts = {}
+    for index = 1, 5 do
+        local value = values[index]
+        if value == nil then
+            break
+        end
+        parts[#parts + 1] = (prefix or "") .. tostring(value)
+    end
+
+    if #parts == 0 then
+        return nil
+    end
+
+    return table.concat(parts, "/")
+end
+
+local function FormatDebugQualityLabel(qualityIndex)
+    qualityIndex = GetNumericValue(qualityIndex)
+    if not qualityIndex or qualityIndex <= 0 then
+        return "미확인"
+    end
+    return tostring(qualityIndex) .. "성"
+end
+
+local function BuildEconomicsDebugSummary(self, recipeID, displayQualityIndex, displayQualityOrigin, data, extraText)
+    local parts = {}
+
+    if displayQualityIndex then
+        parts[#parts + 1] = string.format("현재=%s", FormatDebugQualityLabel(displayQualityIndex))
+    else
+        parts[#parts + 1] = "현재=미확인"
+    end
+
+    if displayQualityOrigin then
+        parts[#parts + 1] = string.format("판독=%s", tostring(displayQualityOrigin))
+    end
+
+    if data and data.hasSalePrice then
+        local baseQuality = data.qualityBaseIndex or data.requestedDisplayQualityIndex or nil
+        parts[#parts + 1] = string.format("기준=%s %s", FormatDebugQualityLabel(baseQuality), self:FormatGoldOnly(data.salePrice))
+
+        if data.topSalePrice and data.qualityTopIndex and data.qualityTopIndex > (data.qualityBaseIndex or 0) then
+            parts[#parts + 1] = string.format("최고=%s %s", FormatDebugQualityLabel(data.qualityTopIndex), self:FormatGoldOnly(data.topSalePrice))
+        elseif data.topSaleStatusText then
+            parts[#parts + 1] = string.format("최고=%s", data.topSaleStatusText)
+        else
+            parts[#parts + 1] = "최고=없음"
+        end
+    elseif data then
+        if data.baseSaleStatusText then
+            parts[#parts + 1] = string.format("기준=%s", data.baseSaleStatusText)
+        else
+            parts[#parts + 1] = "기준=없음"
+        end
+        if data.topSaleStatusText then
+            parts[#parts + 1] = string.format("최고=%s", data.topSaleStatusText)
+        end
+        parts[#parts + 1] = string.format("판매가=없음 재료=%s", self:FormatGoldOnly(data.totalCost))
+    else
+        parts[#parts + 1] = "계산=없음"
+    end
+
+    if extraText and extraText ~= "" then
+        parts[#parts + 1] = extraText
+    end
+
+    return table.concat(parts, " | ")
+end
+
+local function BuildDisplayedQualityDebugSummary(source)
+    if type(source) ~= "table" then
+        return "source=nil"
+    end
+
+    local function DescribeDebugArray(value, limit)
+        if type(value) ~= "table" then
+            return nil
+        end
+
+        limit = limit or 8
+        local items = {}
+        local count = 0
+        for index = 1, limit do
+            local entry = value[index]
+            if entry == nil then
+                break
+            end
+            count = index
+            items[#items + 1] = tostring(entry)
+        end
+
+        if count == 0 then
+            return nil
+        end
+
+        local suffix = value[count + 1] ~= nil and ",..." or ""
+        return "{" .. table.concat(items, ",") .. suffix .. "}"
+    end
+
+    local function DescribeMemberResult(result)
+        if result == nil then
+            return "nil"
+        end
+
+        if type(result) == "table" then
+            local describedArray = DescribeDebugArray(result)
+            if describedArray then
+                return describedArray
+            end
+            return "<table>"
+        end
+
+        return tostring(result)
+    end
+
+    local function DescribeSpecialTable(name, value)
+        if type(value) ~= "table" then
+            return nil
+        end
+
+        if name == "qualityIDs" or name == "qualityIlvlBonuses" then
+            return DescribeDebugArray(value) or "{}"
+        end
+
+        if name == "selectedRecipeLevels" then
+            return DescribeDebugArray(value) or "{}"
+        end
+
+        if name == "AllocateBestQualityCheckbox" then
+            local parts = {}
+            local memberNames = { "GetChecked", "IsEnabled", "IsShown", "GetShown" }
+            for _, memberName in ipairs(memberNames) do
+                local member = value[memberName]
+                if type(member) == "function" then
+                    local ok, result = pcall(member, value)
+                    if ok and result ~= nil then
+                        parts[#parts + 1] = string.format("%s=%s", memberName, tostring(result))
+                    end
+                end
+            end
+            return #parts > 0 and ("{" .. table.concat(parts, ",") .. "}") or "<table>"
+        end
+
+        if name == "RecipeLevelBar" then
+            local parts = {}
+            local memberNames = {
+                "GetValue",
+                "GetMinMaxValues",
+                "GetCurrentValue",
+                "GetUpperValue",
+                "GetLowerValue",
+                "GetShown",
+                "IsShown",
+            }
+            for _, memberName in ipairs(memberNames) do
+                local member = value[memberName]
+                if type(member) == "function" then
+                    local ok, resultA, resultB = pcall(member, value)
+                    if ok then
+                        if resultB ~= nil then
+                            parts[#parts + 1] = string.format("%s=%s,%s", memberName, tostring(resultA), tostring(resultB))
+                        elseif resultA ~= nil then
+                            parts[#parts + 1] = string.format("%s=%s", memberName, tostring(resultA))
+                        end
+                    end
+                end
+            end
+            return #parts > 0 and ("{" .. table.concat(parts, ",") .. "}") or "<table>"
+        end
+
+        if name == "currentRecipeInfo" or name == "QualityDialog" then
+            local parts = {}
+            local memberNames = {
+                "recipeID",
+                "recipeLevel",
+                "maxQuality",
+                "quality",
+                "qualityID",
+                "qualityIndex",
+                "currentQuality",
+                "currentQualityID",
+                "currentQualityIndex",
+                "selectedQuality",
+                "selectedQualityID",
+                "selectedQualityIndex",
+                "qualityIDs",
+                "qualityIlvlBonuses",
+                "selectedRecipeLevels",
+                "currentRecipeLevel",
+            }
+            for _, memberName in ipairs(memberNames) do
+                local memberValue = value[memberName]
+                if type(memberValue) == "function" then
+                    local ok, result = pcall(memberValue, value)
+                    if ok and result ~= nil then
+                        parts[#parts + 1] = string.format("%s=%s", memberName, DescribeMemberResult(result))
+                    end
+                elseif memberValue ~= nil then
+                    parts[#parts + 1] = string.format("%s=%s", memberName, DescribeMemberResult(memberValue))
+                end
+            end
+            return #parts > 0 and ("{" .. table.concat(parts, ",") .. "}") or "<table>"
+        end
+
+        return nil
+    end
+
+    local interestingNamePatterns = {
+        "quality",
+        "output",
+        "expected",
+        "current",
+        "tier",
+        "rank",
+        "override",
+        "level",
+    }
+    local summary = {}
+    local seenNames = {}
+
+    local function IsInteresting(name)
+        if type(name) ~= "string" then
+            return false
+        end
+
+        local lowerName = string.lower(name)
+        for _, pattern in ipairs(interestingNamePatterns) do
+            if string.find(lowerName, pattern, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function AddName(candidate, name)
+        if seenNames[name] or not IsInteresting(name) then
+            return
+        end
+        seenNames[name] = true
+
+        local value = candidate[name]
+        if type(value) == "function" then
+            local ok, result = pcall(value, candidate)
+            if ok then
+                summary[#summary + 1] = string.format("%s=%s", name, DescribeMemberResult(result))
+            else
+                summary[#summary + 1] = string.format("%s=<fn:error>", name)
+            end
+        elseif value ~= nil then
+            local special = DescribeSpecialTable(name, value)
+            if special then
+                summary[#summary + 1] = string.format("%s=%s", name, special)
+            else
+                summary[#summary + 1] = string.format("%s=%s", name, DescribeMemberResult(value))
+            end
+        else
+            summary[#summary + 1] = string.format("%s=nil", name)
+        end
+    end
+
+    for _, candidate in ipairs(CollectDisplayedQualityCandidates(source)) do
+        local priorityNames = {
+            "GetCurrentRecipeLevel",
+            "GetOutputOverrideQualityID",
+            "maxQuality",
+            "qualityIDs",
+            "qualityIlvlBonuses",
+            "alwaysUsesLowestQuality",
+            "hasSingleItemOutput",
+            "currentRecipeInfo",
+            "QualityDialog",
+            "AllocateBestQualityCheckbox",
+            "selectedRecipeLevels",
+            "RecipeLevelBar",
+        }
+        for _, name in ipairs(priorityNames) do
+            AddName(candidate, name)
+            if #summary >= 18 then
+                break
+            end
+        end
+        if #summary >= 18 then
+            break
+        end
+
+        for name in pairs(candidate) do
+            AddName(candidate, name)
+            if #summary >= 18 then
+                break
+            end
+        end
+        if #summary >= 18 then
+            break
+        end
+
+        local meta = getmetatable(candidate)
+        local metaIndex = meta and meta.__index or nil
+        if type(metaIndex) == "table" then
+            for name in pairs(metaIndex) do
+                AddName(candidate, name)
+                if #summary >= 18 then
+                    break
+                end
+            end
+        end
+
+        if #summary >= 18 then
+            break
+        end
+    end
+
+    if #summary == 0 then
+        return "no-quality-members"
+    end
+
+    return table.concat(summary, " | ")
 end
 
 local function GetHoveredQualityIndex(owner, form, options)
@@ -343,16 +923,142 @@ function ns:GetHoveredProfessionQualityIndex(owner, form, options)
     return GetHoveredQualityIndex(owner, form, options)
 end
 
-function ns:GetRecipeListDisplay(recipeID)
+function ns:GetDisplayedProfessionQualityInfo(source)
+    return GetDisplayedQualityInfo(source)
+end
+
+function ns:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
+    if not recipeID
+        or not C_TradeSkillUI
+        or not C_TradeSkillUI.GetCraftingOperationInfo
+        or not Professions
+        or not ProfessionsUtil
+        or not ProfessionsUtil.GetRecipeSchematic
+        or type(CreateProfessionsRecipeTransaction) ~= "function"
+        or type(Professions.AllocateAllBasicReagents) ~= "function"
+    then
+        return nil
+    end
+
+    local recipeInfo = ResolveRecipeInfo(source) or ResolveRecipeInfo(fallbackSource)
+    recipeInfo = (Professions.GetHighestLearnedRecipe and Professions.GetHighestLearnedRecipe(recipeInfo)) or recipeInfo
+    if not recipeInfo and C_TradeSkillUI.GetRecipeInfo then
+        recipeInfo = C_TradeSkillUI.GetRecipeInfo(recipeID)
+    end
+
+    if type(recipeInfo) ~= "table" or not recipeInfo.supportsQualities then
+        return nil
+    end
+
+    local shouldAllocateBest = not recipeInfo.alwaysUsesLowestQuality
+        and Professions.ShouldAllocateBestQualityReagents
+        and Professions.ShouldAllocateBestQualityReagents()
+
+    local cacheKey = table.concat({
+        tostring(recipeID),
+        tostring(GetNumericValue(recipeInfo.unlockedRecipeLevel) or "-"),
+        shouldAllocateBest and "best" or "low",
+    }, ":")
+
+    self._recipeListQualitySimulationCache = self._recipeListQualitySimulationCache or {}
+    if self._recipeListQualitySimulationCache[cacheKey] ~= nil then
+        local cached = self._recipeListQualitySimulationCache[cacheKey]
+        if cached then
+            return cached.qualityIndex, cached.origin
+        end
+        return nil
+    end
+
+    local schematic = ProfessionsUtil.GetRecipeSchematic(
+        recipeID,
+        recipeInfo.isRecraft or false,
+        GetNumericValue(recipeInfo.unlockedRecipeLevel)
+    )
+    if not schematic then
+        self._recipeListQualitySimulationCache[cacheKey] = false
+        return nil
+    end
+
+    local transaction = CreateProfessionsRecipeTransaction(schematic)
+    if not transaction then
+        self._recipeListQualitySimulationCache[cacheKey] = false
+        return nil
+    end
+
+    Professions.AllocateAllBasicReagents(transaction, shouldAllocateBest)
+
+    local operationInfo = C_TradeSkillUI.GetCraftingOperationInfo(
+        recipeID,
+        transaction:CreateCraftingReagentInfoTbl(),
+        transaction:GetAllocationItemGUID(),
+        false
+    )
+    local qualityIndex = NormalizeQualityIndex(operationInfo and operationInfo.craftingQuality)
+    if not qualityIndex then
+        self._recipeListQualitySimulationCache[cacheKey] = false
+        return nil
+    end
+
+    local result = {
+        qualityIndex = qualityIndex,
+        origin = "simulated:auto-basic",
+    }
+    self._recipeListQualitySimulationCache[cacheKey] = result
+    return result.qualityIndex, result.origin
+end
+
+function ns:GetRecipeListDisplay(recipeID, source, fallbackSource)
     -- Keep the recipe list stable regardless of which recipe is selected.
-    local data = self:GetRecipeDisplayEconomics(recipeID)
-    local source = data and "baseline" or "none"
+    local displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(source)
+    if not displayQualityIndex and fallbackSource then
+        displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(fallbackSource)
+    end
+    if not displayQualityIndex then
+        displayQualityIndex, displayQualityOrigin = self:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
+    end
+
+    local options = displayQualityIndex and { displayQualityIndex = displayQualityIndex } or nil
+    local data = self:GetRecipeDisplayEconomics(recipeID, nil, nil, options)
+    local dataSource = data and "baseline" or "none"
 
     self:DebugRecipeTrace(
         recipeID,
-        "ListDisplay source=%s",
-        source or "none"
+        "ListDisplay source=%s displayQuality=%s origin=%s",
+        dataSource or "none",
+        tostring(displayQualityIndex or "nil"),
+        tostring(displayQualityOrigin or "nil")
     )
+
+    if self.DebugRecipeSummary and self.IsRecipeDebugTarget and self:IsRecipeDebugTarget(recipeID) then
+        local apiRecipeInfo = C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo and C_TradeSkillUI.GetRecipeInfo(recipeID) or nil
+        local extraText = nil
+        if apiRecipeInfo then
+            local bonusText = FormatDebugArrayCompact(apiRecipeInfo.qualityIlvlBonuses, "+")
+            extraText = string.format(
+                "목록API=maxQ%s itemLevel=%s%s",
+                tostring(apiRecipeInfo.maxQuality or "-"),
+                tostring(apiRecipeInfo.itemLevel or "-"),
+                bonusText and (" bonus=" .. bonusText) or ""
+            )
+        end
+        self:DebugRecipeSummary(recipeID, "목록 요약", BuildEconomicsDebugSummary(self, recipeID, displayQualityIndex, displayQualityOrigin, data, extraText))
+    end
+
+    if not displayQualityIndex and self.IsRecipeDebugTarget and self:IsRecipeDebugTarget(recipeID) then
+        self:DebugRecipeTrace(recipeID, "ListDisplay probe button=%s", BuildDisplayedQualityDebugSummary(source))
+        if fallbackSource then
+            self:DebugRecipeTrace(recipeID, "ListDisplay probe node=%s", BuildDisplayedQualityDebugSummary(fallbackSource))
+        end
+        self:DebugRecipeTrace(recipeID, "ListDisplay visuals button=%s", BuildFrameVisualDebugSummary(source))
+        if C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+            local apiRecipeInfo = C_TradeSkillUI.GetRecipeInfo(recipeID)
+            self:DebugRecipeTrace(recipeID, "ListDisplay api recipeInfo=%s", BuildDisplayedQualityDebugSummary(apiRecipeInfo))
+        end
+        if ProfessionsUtil and ProfessionsUtil.GetRecipeSchematic then
+            local apiSchematic = ProfessionsUtil.GetRecipeSchematic(recipeID, false, nil)
+            self:DebugRecipeTrace(recipeID, "ListDisplay api schematic=%s", BuildDisplayedQualityDebugSummary(apiSchematic))
+        end
+    end
 
     if not data then
         return nil, self.colors.neutral, nil
@@ -392,7 +1098,7 @@ function ns:UpdateRecipeProfitButton(button, node)
         return
     end
 
-    local text, color = self:GetRecipeListDisplay(recipeID)
+    local text, color = self:GetRecipeListDisplay(recipeID, button, node)
     if not text then
         label:Hide()
         return
@@ -542,10 +1248,39 @@ function ns:UpdateSchematicSummary(form)
     end
 
     local transaction = GetProfessionTransaction(form)
-    local data = self:GetRecipeDisplayEconomics(recipeInfo.recipeID)
+    local displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(form)
+    local options = displayQualityIndex and { displayQualityIndex = displayQualityIndex } or nil
+    local data = self:GetRecipeDisplayEconomics(recipeInfo.recipeID, nil, nil, options)
     if not data then
         summary:Hide()
         return
+    end
+
+    self:DebugRecipeTrace(
+        recipeInfo.recipeID,
+        "SchematicDisplay displayQuality=%s origin=%s",
+        tostring(displayQualityIndex or "nil"),
+        tostring(displayQualityOrigin or "nil")
+    )
+
+    if self.DebugRecipeSummary and self.IsRecipeDebugTarget and self:IsRecipeDebugTarget(recipeInfo.recipeID) then
+        local currentRecipeInfo = form and form.currentRecipeInfo or nil
+        local qualityIDText = currentRecipeInfo and FormatDebugArrayCompact(currentRecipeInfo.qualityIDs) or nil
+        local bonusText = currentRecipeInfo and FormatDebugArrayCompact(currentRecipeInfo.qualityIlvlBonuses, "+") or nil
+        local extraText = nil
+        if qualityIDText or bonusText then
+            extraText = string.format(
+                "세부UI=%s%s",
+                qualityIDText and ("IDs " .. qualityIDText) or "",
+                bonusText and ((qualityIDText and " / " or "") .. "bonus=" .. bonusText) or ""
+            )
+        end
+        self:DebugRecipeSummary(recipeInfo.recipeID, "세부창 요약", BuildEconomicsDebugSummary(self, recipeInfo.recipeID, displayQualityIndex, displayQualityOrigin, data, extraText))
+    end
+
+    if not displayQualityIndex and self.IsRecipeDebugTarget and self:IsRecipeDebugTarget(recipeInfo.recipeID) then
+        self:DebugRecipeTrace(recipeInfo.recipeID, "SchematicDisplay probe form=%s", BuildDisplayedQualityDebugSummary(form))
+        self:DebugRecipeTrace(recipeInfo.recipeID, "SchematicDisplay visuals form=%s", BuildFrameVisualDebugSummary(form))
     end
 
     -- The list/detail base value stays on the stable baseline path, but two-quality
@@ -579,8 +1314,18 @@ function ns:UpdateSchematicSummary(form)
 
     if not data.hasSalePrice then
         summary.sale:SetText(self:WrapColor("재료+비용: ", self.colors.neutral) .. self:WrapColor(self:FormatGoldOnly(data.totalCost), self.colors.neutral))
-        summary.fee:Hide()
-        summary.cost:Hide()
+        if data.baseSaleStatusText then
+            summary.fee:SetText(self:WrapColor("기준가: ", "FF74D06C") .. self:WrapColor(data.baseSaleStatusText, self.colors.text))
+            summary.fee:Show()
+        else
+            summary.fee:Hide()
+        end
+        if data.topSaleStatusText then
+            summary.cost:SetText(self:WrapColor("추가 기준가: ", "FF74D06C") .. self:WrapColor(data.topSaleStatusText, self.colors.text))
+            summary.cost:Show()
+        else
+            summary.cost:Hide()
+        end
         summary.profit:Hide()
         summary.sale:Show()
         summary:Show()
@@ -596,37 +1341,49 @@ function ns:UpdateSchematicSummary(form)
         and data.topSalePrice ~= data.salePrice
     local hasMissingTopDisplay = not hasTopDisplay
         and data.topSaleStatusText
-        and data.qualityMode >= 4
 
-    local saleText = self:WrapColor("기준가: ", "FF74D06C") .. self:FormatGoldOnly(data.salePrice)
+    local baseSaleText = data.baseSaleStatusText and not data.salePrice
+        and self:WrapColor(data.baseSaleStatusText, self.colors.text)
+        or self:FormatGoldOnly(data.salePrice)
+    local saleText = self:WrapColor("기준가: ", "FF74D06C") .. baseSaleText
     if data.qualityMode == 2 and data.qualityBaseIndex == 2 then
         saleText = saleText .. self:WrapColor("(2등급)", self.colors.text)
     end
     if hasTopDisplay then
         saleText = saleText .. ", " .. self:FormatGoldOnly(data.topSalePrice) .. self:WrapColor(string.format("(%d등급)", data.qualityTopIndex), self.colors.text)
     elseif hasMissingTopDisplay then
-        saleText = saleText .. self:WrapColor(string.format(" (%s)", data.topSaleStatusText), self.colors.text)
+        saleText = saleText .. self:WrapColor(string.format(", (%s)", data.topSaleStatusText), self.colors.text)
     end
 
     local costText = self:WrapColor("재료+비용: ", "FF74D06C")
         .. self:FormatGoldOnly(data.totalCost)
 
+    local baseProfitText = data.baseSaleStatusText and not data.profit
+        and self:WrapColor(data.baseSaleStatusText, self.colors.text)
+        or self:WrapColor(self:FormatGoldOnly(data.profit), color)
     local profitText = self:WrapColor("순이익: ", "FF74D06C")
-        .. self:WrapColor(self:FormatGoldOnly(data.profit), color)
+        .. baseProfitText
     if data.qualityMode == 2 and data.qualityBaseIndex == 2 then
         profitText = profitText .. self:WrapColor("(2등급)", self.colors.text)
     end
     if hasTopDisplay and data.topProfit then
         profitText = profitText .. ", " .. self:WrapColor(self:FormatGoldOnly(data.topProfit), topColor) .. self:WrapColor(string.format("(%d등급)", data.qualityTopIndex), self.colors.text)
+    elseif hasMissingTopDisplay then
+        profitText = profitText .. self:WrapColor(string.format(", (%s)", data.topSaleStatusText), self.colors.text)
     end
 
+    local baseMarginText = data.baseSaleStatusText and type(data.margin) ~= "number"
+        and self:WrapColor(data.baseSaleStatusText, self.colors.text)
+        or self:WrapColor(self:FormatPercent(data.margin), color)
     local marginText = self:WrapColor("이익률: ", "FF74D06C")
-        .. self:WrapColor(self:FormatPercent(data.margin), color)
+        .. baseMarginText
     if data.qualityMode == 2 and data.qualityBaseIndex == 2 then
         marginText = marginText .. self:WrapColor("(2등급)", self.colors.text)
     end
     if hasTopDisplay and data.topMargin then
         marginText = marginText .. ", " .. self:WrapColor(self:FormatPercent(data.topMargin), topColor) .. self:WrapColor(string.format("(%d등급)", data.qualityTopIndex), self.colors.text)
+    elseif hasMissingTopDisplay then
+        marginText = marginText .. self:WrapColor(string.format(", (%s)", data.topSaleStatusText), self.colors.text)
     end
 
     summary.sale:SetText(costText)
@@ -727,6 +1484,8 @@ function ns:RefreshProfessionViews()
     if not ProfessionsFrame or not ProfessionsFrame.CraftingPage then
         return
     end
+
+    self._recipeListQualitySimulationCache = nil
 
     local page = ProfessionsFrame.CraftingPage
     if page.SchematicForm then

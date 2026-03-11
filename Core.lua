@@ -26,7 +26,8 @@ ns.defaults = {
     showTooltipPrices = true,
     showRecipeListProfit = true,
     debugRecipeTrace = false,
-    debugRecipeTarget = "",
+    debugRecipeVerbose = false,
+    debugRecipeTarget = "밀수업자의 가죽 발보호구,밀수업자의 가죽 손목띠",
     dbVersion = 3,
 }
 
@@ -160,7 +161,8 @@ local function OnAddonLoaded()
     ns.Settings.scanCooldown = 0
     ns.Settings.nextScanAt = 0
     ns.Settings.debugRecipeTrace = false
-    ns.Settings.debugRecipeTarget = ""
+    ns.Settings.debugRecipeVerbose = false
+    ns.Settings.debugRecipeTarget = ns.defaults.debugRecipeTarget
 
     if ns.Settings.dbVersion ~= ns.defaults.dbVersion then
         wipe(ns.PriceDB)

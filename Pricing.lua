@@ -70,6 +70,15 @@ local function IterateDebugTargets(targets)
     end
 end
 
+local function GetDebugRecipeName(recipeID)
+    if not recipeID then
+        return "이름없음"
+    end
+
+    local recipeInfo = C_TradeSkillUI.GetRecipeInfo and C_TradeSkillUI.GetRecipeInfo(recipeID) or nil
+    return recipeInfo and recipeInfo.name or ("recipeID=" .. tostring(recipeID))
+end
+
 function ns:IsRecipeDebugTarget(recipeID)
     local target = self.Settings and self.Settings.debugRecipeTarget or nil
     if not target or target == "" or not recipeID then
@@ -111,7 +120,7 @@ function ns:IsDebugItemTarget(itemID, link)
 end
 
 function ns:DebugRecipeTrace(recipeID, message, ...)
-    if not self.Settings or not self.Settings.debugRecipeTrace then
+    if not self.Settings or not self.Settings.debugRecipeTrace or not self.Settings.debugRecipeVerbose then
         return
     end
 
@@ -120,6 +129,28 @@ function ns:DebugRecipeTrace(recipeID, message, ...)
     end
 
     self:Printf("[DEBUG] " .. message, ...)
+end
+
+function ns:DebugRecipeSummary(recipeID, scopeLabel, summaryText)
+    if not self.Settings or not self.Settings.debugRecipeTrace then
+        return
+    end
+
+    if not self:IsRecipeDebugTarget(recipeID) then
+        return
+    end
+
+    local recipeName = GetDebugRecipeName(recipeID)
+    local rendered = string.format("[DEBUG] %s | %s | %s", tostring(scopeLabel or "요약"), recipeName, tostring(summaryText or "-"))
+    self._debugSummaryCache = self._debugSummaryCache or {}
+
+    local cacheKey = tostring(scopeLabel or "요약") .. ":" .. tostring(recipeID)
+    if self._debugSummaryCache[cacheKey] == rendered then
+        return
+    end
+
+    self._debugSummaryCache[cacheKey] = rendered
+    self:Printf(rendered)
 end
 
 function ns:GetItemVariant(link)
@@ -947,7 +978,7 @@ function ns:GetStrictRecipeQualityPrice(entry, qualityMode)
     end
     rankedPrice, rankedSeen, rankedItemLevel, rankedLink = self:GetPriceForQualityRank(entry.itemID, entry.qualityIndex)
 
-    if self:IsDebugItemTarget(entry.itemID, entry.link) then
+    if self.Settings and self.Settings.debugRecipeTrace and self.Settings.debugRecipeVerbose and self:IsDebugItemTarget(entry.itemID, entry.link) then
         self:Printf(
             "[DEBUG] quality=%s itemID=%s variant=%s itemLevel=%s exact=%s ilevel=%s ranked=%s link=%s",
             FormatDebugValue(entry.qualityIndex),
@@ -1098,15 +1129,20 @@ function ns:GetRecipePriceByDisplayedItemLevel(recipeID, displayedItemLevel, tra
     return BuildRecipeQualitySale(entry, price, itemLevel, link)
 end
 
-function ns:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm)
+function ns:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm, options)
     local context = self:GetRecipeQualityContext(recipeID, transaction, schematicForm)
     local qualityEntries = context and context.entries or nil
     local byQualityIndex = context and context.byQualityIndex or nil
     local qualityMode = context and context.qualityMode or 1
+    local requestedDisplayQualityIndex = options and tonumber(options.displayQualityIndex) or nil
+    if requestedDisplayQualityIndex and (requestedDisplayQualityIndex < 1 or requestedDisplayQualityIndex > 5) then
+        requestedDisplayQualityIndex = nil
+    end
     if qualityEntries and #qualityEntries > 0 then
         local baseIndex, topIndex = GetPreferredQualityIndexes(qualityMode)
         local topSale = nil
         local baseSale = nil
+        local baseMissingText = nil
         local topMissingText = nil
 
         local function ResolveStrictSale(index)
@@ -1139,31 +1175,79 @@ function ns:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm)
             return nil
         end
 
-        if qualityMode == 2 then
-            -- Two-quality recipes should default to rank 1 and show rank 2 as the top option.
-            baseSale = ResolveFirstAvailable({ 1, 2 })
-            topSale = ResolveFirstAvailable({ 2 })
-        elseif qualityMode >= 4 then
-            baseSale = ResolveFirstAvailable({ 2, 1 })
-            local topCandidates = {}
-            for qualityIndex = qualityMode, math.max(qualityMode - 1, 1), -1 do
-                topCandidates[#topCandidates + 1] = qualityIndex
+        local function ResolveHigherSale(startIndex)
+            if not startIndex or startIndex >= qualityMode then
+                return nil
             end
-            topSale = ResolveFirstAvailable(topCandidates)
-            if not topSale then
-                topMissingText = "상위등급 없음"
+
+            local candidates = {}
+            for qualityIndex = qualityMode, startIndex + 1, -1 do
+                if byQualityIndex and byQualityIndex[qualityIndex] then
+                    candidates[#candidates + 1] = qualityIndex
+                end
             end
-        else
-            baseSale = ResolveStrictSale(baseIndex)
-            topSale = topIndex and topIndex ~= baseIndex and ResolveStrictSale(topIndex) or nil
+            return ResolveFirstAvailable(candidates)
+        end
+
+        if requestedDisplayQualityIndex then
+            if byQualityIndex and byQualityIndex[requestedDisplayQualityIndex] then
+                baseSale = ResolveStrictSale(requestedDisplayQualityIndex)
+            end
+
+            if baseSale and baseSale.price then
+                topSale = ResolveHigherSale(requestedDisplayQualityIndex)
+                if not topSale then
+                    if requestedDisplayQualityIndex < qualityMode then
+                        topMissingText = "상위 등급 가격 없음"
+                    else
+                        topMissingText = "상위 등급 없음"
+                    end
+                end
+            else
+                baseSale = nil
+                baseMissingText = string.format("%d등급 가격 없음", requestedDisplayQualityIndex)
+                if requestedDisplayQualityIndex < qualityMode then
+                    local higherSale = ResolveHigherSale(requestedDisplayQualityIndex)
+                    if higherSale and higherSale.price then
+                        topSale = higherSale
+                    else
+                        topMissingText = "상위 등급 가격 없음"
+                    end
+                else
+                    topMissingText = "상위 등급 없음"
+                end
+            end
+        end
+
+        if not baseSale and not baseMissingText then
+            if qualityMode == 2 then
+                -- Two-quality recipes should default to rank 1 and show rank 2 as the top option.
+                baseSale = ResolveFirstAvailable({ 1, 2 })
+                topSale = ResolveFirstAvailable({ 2 })
+            elseif qualityMode >= 4 then
+                baseSale = ResolveFirstAvailable({ 2, 1 })
+                local topCandidates = {}
+                for qualityIndex = qualityMode, math.max(qualityMode - 1, 1), -1 do
+                    topCandidates[#topCandidates + 1] = qualityIndex
+                end
+                topSale = ResolveFirstAvailable(topCandidates)
+                if not topSale then
+                    topMissingText = "상위 등급 가격 없음"
+                end
+            else
+                baseSale = ResolveStrictSale(baseIndex)
+                topSale = topIndex and topIndex ~= baseIndex and ResolveStrictSale(topIndex) or nil
+            end
         end
 
         self:DebugRecipeTrace(
             recipeID,
-            "SaleInfo mode=%s base=q%s/%s top=q%s/%s topMissing=%s",
+            "SaleInfo mode=%s requested=%s base=q%s/%s baseMissing=%s top=q%s/%s topMissing=%s",
             FormatDebugValue(qualityMode),
+            FormatDebugValue(requestedDisplayQualityIndex),
             FormatDebugValue(baseSale and baseSale.qualityIndex or nil),
             FormatDebugValue(baseSale and baseSale.price or nil),
+            FormatDebugValue(baseMissingText),
             FormatDebugValue(topSale and topSale.qualityIndex or nil),
             FormatDebugValue(topSale and topSale.price or nil),
             FormatDebugValue(topMissingText)
@@ -1173,10 +1257,12 @@ function ns:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm)
             mode = qualityMode,
             base = baseSale,
             top = topSale,
-            baseDisplayIndex = baseSale and baseSale.qualityIndex or baseIndex,
+            baseDisplayIndex = baseSale and baseSale.qualityIndex or requestedDisplayQualityIndex or baseIndex,
             topDisplayIndex = topSale and topSale.qualityIndex or topIndex,
+            baseMissingText = baseMissingText,
             topMissingText = topMissingText,
             qualityItemIDs = qualityEntries,
+            requestedDisplayQualityIndex = requestedDisplayQualityIndex,
         }
     end
 
@@ -1246,8 +1332,8 @@ function ns:GetRecipeQualityPriceForIndex(recipeID, qualityIndex, transaction, s
     }
 end
 
-function ns:GetRecipeDisplayEconomics(recipeID, transaction, schematicForm)
-    local data = self:GetRecipeEconomics(recipeID, transaction, schematicForm)
+function ns:GetRecipeDisplayEconomics(recipeID, transaction, schematicForm, options)
+    local data = self:GetRecipeEconomics(recipeID, transaction, schematicForm, options)
     if not data then
         return nil
     end
@@ -1432,7 +1518,7 @@ function ns:GetBaselineRecipeCost(recipeID)
     return totalCost
 end
 
-function ns:GetRecipeEconomics(recipeID, transaction, schematicForm)
+function ns:GetRecipeEconomics(recipeID, transaction, schematicForm, options)
     local usingTransaction = transaction ~= nil
     local totalCost = transaction and self:GetDetailedRecipeCost(transaction) or self:GetBaselineRecipeCost(recipeID)
 
@@ -1441,7 +1527,7 @@ function ns:GetRecipeEconomics(recipeID, transaction, schematicForm)
         return nil
     end
 
-    local saleInfo = self:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm)
+    local saleInfo = self:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm, options)
     local baseSale = saleInfo and saleInfo.base or nil
     local topSale = saleInfo and saleInfo.top or nil
     local salePrice = baseSale and baseSale.price or nil
@@ -1481,6 +1567,8 @@ function ns:GetRecipeEconomics(recipeID, transaction, schematicForm)
         qualityMode = saleInfo and saleInfo.mode or 0,
         qualityBaseIndex = baseSale and baseSale.qualityIndex or (saleInfo and saleInfo.baseDisplayIndex or nil),
         qualityTopIndex = topSale and topSale.qualityIndex or (saleInfo and saleInfo.topDisplayIndex or nil),
+        requestedDisplayQualityIndex = saleInfo and saleInfo.requestedDisplayQualityIndex or nil,
+        baseSaleStatusText = saleInfo and saleInfo.baseMissingText or nil,
         topSalePrice = topSale and topSale.price or nil,
         topSaleItemID = topSale and topSale.itemID or nil,
         topSaleLink = topSale and topSale.link or nil,
@@ -1553,8 +1641,14 @@ function ns:SetupSlashCommands()
         elseif command == "debug off" then
             ns.Settings.debugRecipeTrace = false
             ns:Printf("디버그를 껐습니다.")
+        elseif command == "debug verbose on" then
+            ns.Settings.debugRecipeVerbose = true
+            ns:Printf("상세 디버그를 켰습니다.")
+        elseif command == "debug verbose off" then
+            ns.Settings.debugRecipeVerbose = false
+            ns:Printf("상세 디버그를 껐습니다.")
         elseif command == "debug status" then
-            ns:Printf("디버그: %s / 대상: %s", ns.Settings.debugRecipeTrace and "ON" or "OFF", ns.Settings.debugRecipeTarget or "-")
+            ns:Printf("디버그: %s / 상세: %s / 대상: %s", ns.Settings.debugRecipeTrace and "ON" or "OFF", ns.Settings.debugRecipeVerbose and "ON" or "OFF", ns.Settings.debugRecipeTarget or "-")
         elseif string.find(command, "debug target ", 1, true) == 1 then
             local target = strtrim(string.sub(rawMessage, 14))
             if target == "" then
@@ -1568,7 +1662,7 @@ function ns:SetupSlashCommands()
             wipe(ns.PriceDB[ns.regionKey])
             ns:Printf("Price data cleared.")
         else
-            ns:Printf("/cp scan, /cp status, /cp debug on, /cp debug off, /cp debug status, /cp debug target <이름[,이름]>, /cp wipe")
+            ns:Printf("/cp scan, /cp status, /cp debug on, /cp debug off, /cp debug verbose on, /cp debug verbose off, /cp debug status, /cp debug target <이름[,이름]>, /cp wipe")
         end
     end
 end

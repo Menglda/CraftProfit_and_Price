@@ -2,7 +2,7 @@
 ## Title: |cFF74D06CCraft|rProfit
 ## Notes: Manual AH scan, tooltip prices, and profession profit display.
 ## Author: Menglda
-## Version: 0.1.0
+## Version: v1.2
 ## SavedVariables: CraftProfitSettings, CraftProfitPriceDB
 ## OptionalDeps: Blizzard_AuctionHouseUI, Blizzard_Professions
 ## Category: Auctions

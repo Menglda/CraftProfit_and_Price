@@ -20,6 +20,22 @@ local function IsActiveScan(self, scanRunId)
         and self.scanStats ~= nil
 end
 
+local function DebugScanSummary(self, phase, extraText)
+    if not self or not self.Settings or not self.Settings.debugRecipeTrace then
+        return
+    end
+
+    local readyText = IsThrottledMessageSystemReady and tostring(IsThrottledMessageSystemReady()) or "nil"
+    local replicateCount = GetNumReplicateItems and GetNumReplicateItems() or nil
+    self:Printf(
+        "[DEBUG] 스캔 요약 | %s | ready=%s | replicate=%s%s",
+        tostring(phase or "-"),
+        readyText,
+        tostring(replicateCount or "nil"),
+        extraText and extraText ~= "" and (" | " .. extraText) or ""
+    )
+end
+
 local function ClearThrottleWait(self)
     self.scanAwaitingReady = false
     self.scanWaitRunId = nil
@@ -30,6 +46,8 @@ function ns:AbortScan(reason)
     if not self.scanInProgress and not self.scanAwaitingReady then
         return
     end
+
+    DebugScanSummary(self, "중단", reason)
 
     if self.scanPendingLoads then
         for _, cancel in pairs(self.scanPendingLoads) do
@@ -116,6 +134,7 @@ function ns:StartScan()
         self.scanAwaitingReady = true
         self.frame:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
         self:UpdateScanButton()
+        DebugScanSummary(self, "대기진입", "throttle-not-ready")
         self:Printf("블리자드 경매장 제한으로 인해 스캔 가능 상태를 기다리는 중입니다.")
 
         local waitRunId = self.scanWaitRunId
@@ -140,10 +159,12 @@ function ns:StartScan()
 
     self.frame:RegisterEvent("REPLICATE_ITEM_LIST_UPDATE")
     self:UpdateScanButton()
+    DebugScanSummary(self, "시작", "ReplicateItems")
     self:Printf("경매장 전체 가격 스캔을 시작합니다.")
 
     local scanRunId = self.scanRunId
-    C_Timer.After(10, function()
+    local responseTimeoutSeconds = 20
+    C_Timer.After(responseTimeoutSeconds, function()
         if IsActiveScan(self, scanRunId) then
             self:AbortScan("스캔 응답이 없어 중단했습니다. 경매장 창을 그대로 둔 상태에서 다시 시도해주세요.")
         end
@@ -157,6 +178,7 @@ end
 
 function ns:OnReplicateItemListUpdate()
     self.frame:UnregisterEvent("REPLICATE_ITEM_LIST_UPDATE")
+    DebugScanSummary(self, "응답수신", "REPLICATE_ITEM_LIST_UPDATE")
     self:CollectReplicateItems()
 end
 
@@ -170,6 +192,8 @@ function ns:CollectReplicateItems()
         self:AbortScan("경매장 데이터가 아직 준비되지 않았습니다. 경매장 창을 그대로 둔 상태에서 다시 시도해주세요.")
         return
     end
+
+    DebugScanSummary(self, "수집시작", string.format("total=%s", tostring(total)))
 
     local function StoreReplicateIndex(index, stackable)
         if not IsActiveScan(self, scanRunId) then
@@ -247,6 +271,7 @@ function ns:FinalizeScan()
         return
     end
 
+    DebugScanSummary(self, "완료직전", string.format("new=%d updated=%d removed=%d", self.scanStats.new, self.scanStats.updated, self.scanStats.removed))
     self.scanInProgress = false
     self.scanStartedAt = nil
     self:ParseScanBuffer()
