@@ -27,7 +27,7 @@ ns.defaults = {
     showRecipeListProfit = true,
     debugRecipeTrace = false,
     debugRecipeVerbose = false,
-    debugRecipeTarget = "밀수업자의 가죽 발보호구,밀수업자의 가죽 손목띠",
+    debugRecipeTarget = "",
     dbVersion = 3,
 }
 
@@ -200,6 +200,9 @@ ns.frame:SetScript("OnEvent", function(_, event, ...)
     elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
         ns:OnAuctionHouseThrottleReady()
     elseif event == "TRADE_SKILL_LIST_UPDATE" or event == "CRAFTING_DETAILS_UPDATE" or event == "TRACKED_RECIPE_UPDATE" then
+        if ns.professionHooksInstalled then
+            return
+        end
         if type(ns.ScheduleProfessionViewsRefresh) == "function" then
             ns:ScheduleProfessionViewsRefresh(event)
         elseif type(ns.RefreshProfessionViews) == "function" then

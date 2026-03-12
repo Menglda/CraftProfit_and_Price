@@ -536,6 +536,10 @@ local function BuildEconomicsDebugSummary(self, recipeID, displayQualityIndex, d
         parts[#parts + 1] = string.format("판독=%s", tostring(displayQualityOrigin))
     end
 
+    if data and data.outputQuantity then
+        parts[#parts + 1] = string.format("수량=x%s", tostring(data.outputQuantity))
+    end
+
     if data and data.hasSalePrice then
         local baseQuality = data.qualityBaseIndex or data.requestedDisplayQualityIndex or nil
         parts[#parts + 1] = string.format("기준=%s %s", FormatDebugQualityLabel(baseQuality), self:FormatGoldOnly(data.salePrice))
@@ -964,7 +968,7 @@ function ns:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
     if self._recipeListQualitySimulationCache[cacheKey] ~= nil then
         local cached = self._recipeListQualitySimulationCache[cacheKey]
         if cached then
-            return cached.qualityIndex, cached.origin
+            return cached.qualityIndex, cached.origin, cached.outputQuantity
         end
         return nil
     end
@@ -1002,22 +1006,35 @@ function ns:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
     local result = {
         qualityIndex = qualityIndex,
         origin = "simulated:auto-basic",
+        outputQuantity = ns.GetRecipeOutputQuantity and ns:GetRecipeOutputQuantity(recipeID, transaction, nil) or 1,
     }
     self._recipeListQualitySimulationCache[cacheKey] = result
-    return result.qualityIndex, result.origin
+    return result.qualityIndex, result.origin, result.outputQuantity
 end
 
 function ns:GetRecipeListDisplay(recipeID, source, fallbackSource)
     -- Keep the recipe list stable regardless of which recipe is selected.
+    local outputQuantity = nil
     local displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(source)
     if not displayQualityIndex and fallbackSource then
         displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(fallbackSource)
     end
+    local simulatedQualityIndex, simulatedQualityOrigin, simulatedOutputQuantity = self:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
     if not displayQualityIndex then
-        displayQualityIndex, displayQualityOrigin = self:GetSimulatedRecipeListQualityInfo(recipeID, source, fallbackSource)
+        displayQualityIndex, displayQualityOrigin = simulatedQualityIndex, simulatedQualityOrigin
     end
+    outputQuantity = simulatedOutputQuantity
 
-    local options = displayQualityIndex and { displayQualityIndex = displayQualityIndex } or nil
+    local options = nil
+    if displayQualityIndex or outputQuantity then
+        options = {}
+        if displayQualityIndex then
+            options.displayQualityIndex = displayQualityIndex
+        end
+        if outputQuantity and outputQuantity > 0 then
+            options.outputQuantityOverride = outputQuantity
+        end
+    end
     local data = self:GetRecipeDisplayEconomics(recipeID, nil, nil, options)
     local dataSource = data and "baseline" or "none"
 
@@ -1074,7 +1091,13 @@ end
 function ns:ScheduleProfessionViewsRefresh(reason)
     self._professionRefreshToken = (self._professionRefreshToken or 0) + 1
     local token = self._professionRefreshToken
-    local delays = { 0, 0.15, 0.6 }
+    local delays
+
+    if reason == "transaction-updated" or reason == "crafting-page-refresh" then
+        delays = { 0.1 }
+    else
+        delays = { 0, 0.12 }
+    end
 
     for _, delaySeconds in ipairs(delays) do
         C_Timer.After(delaySeconds, function()
@@ -1180,59 +1203,6 @@ function ns:EnsureSchematicSummary(form)
     return frame
 end
 
-local function ParseStoredProfessionQualityTier(link)
-    local qualityTier = link and string.match(link, "Quality[^:|]*%-Tier(%d+)") or nil
-    qualityTier = qualityTier and tonumber(qualityTier) or nil
-    if qualityTier and qualityTier >= 1 and qualityTier <= 5 then
-        return qualityTier
-    end
-    return nil
-end
-
-local function GetStoredTwoQualityTopInfo(self, recipeID)
-    if not recipeID or not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeQualityItemIDs then
-        return nil
-    end
-
-    local qualityItemIDs = C_TradeSkillUI.GetRecipeQualityItemIDs(recipeID)
-    local itemID = qualityItemIDs and tonumber(qualityItemIDs[2]) or nil
-    if not itemID or itemID <= 0 then
-        return nil
-    end
-
-    local record = self.GetDBRecord and self:GetDBRecord(itemID) or nil
-    if not record then
-        return nil
-    end
-
-    local bestLink = nil
-    local bestPrice = nil
-    local bestItemLevel = nil
-
-    for _, data in pairs(record) do
-        if type(data) == "table" and data.Price then
-            local qualityTier = ParseStoredProfessionQualityTier(data.Link)
-            if qualityTier == 2 and (not bestPrice or data.Price < bestPrice) then
-                bestPrice = data.Price
-                bestLink = data.Link
-                bestItemLevel = tonumber(data.ItemLevel) or nil
-            end
-        end
-    end
-
-    if not bestPrice then
-        return nil
-    end
-
-    return {
-        itemID = itemID,
-        link = bestLink,
-        price = bestPrice,
-        qualityIndex = 2,
-        itemLevel = bestItemLevel,
-    }
-end
-
 function ns:UpdateSchematicSummary(form)
     if not form then
         return
@@ -1249,7 +1219,17 @@ function ns:UpdateSchematicSummary(form)
 
     local transaction = GetProfessionTransaction(form)
     local displayQualityIndex, displayQualityOrigin = self:GetDisplayedProfessionQualityInfo(form)
-    local options = displayQualityIndex and { displayQualityIndex = displayQualityIndex } or nil
+    local outputQuantity = self.GetRecipeOutputQuantity and self:GetRecipeOutputQuantity(recipeInfo.recipeID, transaction, form) or nil
+    local options = nil
+    if displayQualityIndex or outputQuantity then
+        options = {}
+        if displayQualityIndex then
+            options.displayQualityIndex = displayQualityIndex
+        end
+        if outputQuantity and outputQuantity > 0 then
+            options.outputQuantityOverride = outputQuantity
+        end
+    end
     local data = self:GetRecipeDisplayEconomics(recipeInfo.recipeID, nil, nil, options)
     if not data then
         summary:Hide()
@@ -1283,33 +1263,9 @@ function ns:UpdateSchematicSummary(form)
         self:DebugRecipeTrace(recipeInfo.recipeID, "SchematicDisplay visuals form=%s", BuildFrameVisualDebugSummary(form))
     end
 
-    -- The list/detail base value stays on the stable baseline path, but two-quality
-    -- recipes still need the live rank-2 sale from the selected profession form.
     local formQualityContext = self.GetRecipeQualityContext and self:GetRecipeQualityContext(recipeInfo.recipeID, transaction, form) or nil
     if formQualityContext and formQualityContext.qualityMode == 2 then
         data.qualityMode = 2
-        data.qualityBaseIndex = data.qualityBaseIndex or 1
-
-        if not data.topSalePrice then
-            local topInfo = GetStoredTwoQualityTopInfo(self, recipeInfo.recipeID)
-            if not topInfo then
-                topInfo = self:GetRecipeQualityPriceForIndex(recipeInfo.recipeID, 2, transaction, form)
-            end
-            if topInfo and topInfo.price then
-                local auctionCutRate = self.Settings and self.Settings.auctionCutRate or 0.05
-                local topAuctionCut = math.floor(topInfo.price * auctionCutRate)
-                local topNetSale = topInfo.price - topAuctionCut
-                local topProfit = topNetSale - data.totalCost
-
-                data.qualityTopIndex = topInfo.qualityIndex or 2
-                data.topSalePrice = topInfo.price
-                data.topSaleItemID = topInfo.itemID
-                data.topSaleLink = topInfo.link
-                data.topAuctionCut = topAuctionCut
-                data.topProfit = topProfit
-                data.topMargin = (topProfit and data.totalCost > 0) and (topProfit / data.totalCost) or nil
-            end
-        end
     end
 
     if not data.hasSalePrice then
@@ -1339,7 +1295,11 @@ function ns:UpdateSchematicSummary(form)
         and data.qualityBaseIndex
         and data.qualityTopIndex > data.qualityBaseIndex
         and data.topSalePrice ~= data.salePrice
+    local suppressMissingTopDisplay = data.qualityMode == 2
+        and data.qualityBaseIndex == 2
+        and data.topSaleStatusText == "상위 등급 없음"
     local hasMissingTopDisplay = not hasTopDisplay
+        and not suppressMissingTopDisplay
         and data.topSaleStatusText
 
     local baseSaleText = data.baseSaleStatusText and not data.salePrice
@@ -1526,12 +1486,6 @@ function ns:SetupProfessionHooks()
             end, self)
         end
 
-        if ProfessionsRecipeListMixin then
-            hooksecurefunc(ProfessionsRecipeListMixin, "SelectRecipe", function()
-                ns:ScheduleProfessionViewsRefresh("select-recipe")
-            end)
-        end
-
         if ProfessionsReagentSlotMixin then
             hooksecurefunc(ProfessionsReagentSlotMixin, "Update", function(slot)
                 ns:UpdateReagentPriceLabel(slot)
@@ -1561,23 +1515,11 @@ function ns:SetupProfessionHooks()
             hooksecurefunc(ProfessionsCraftingPageMixin, "Init", function()
                 ns:ScheduleProfessionViewsRefresh("crafting-page-init")
             end)
-            hooksecurefunc(ProfessionsCraftingPageMixin, "Refresh", function()
-                ns:ScheduleProfessionViewsRefresh("crafting-page-refresh")
-            end)
         end
 
         if ProfessionsRecipeSchematicFormMixin then
             hooksecurefunc(ProfessionsRecipeSchematicFormMixin, "Init", function(form)
-                ns:UpdateSchematicSummary(form)
-                ns:UpdateProfessionGraph(form)
-            end)
-            hooksecurefunc(ProfessionsRecipeSchematicFormMixin, "Refresh", function(form)
-                ns:UpdateSchematicSummary(form)
-                ns:UpdateProfessionGraph(form)
-            end)
-            hooksecurefunc(ProfessionsRecipeSchematicFormMixin, "UpdateDetailsStats", function(form)
-                ns:UpdateSchematicSummary(form)
-                ns:UpdateProfessionGraph(form)
+                ns:ScheduleProfessionViewsRefresh("schematic-init")
             end)
         end
     end

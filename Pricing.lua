@@ -376,6 +376,102 @@ function ns:GetPriceForQualityRank(itemID, qualityIndex)
     return selected.Price, selected.LastSeen, selected.ItemLevel, selected.Link, #sortedLevels
 end
 
+function ns:GetPriceForProfessionQualityTier(itemID, qualityIndex)
+    itemID = tonumber(itemID)
+    qualityIndex = tonumber(qualityIndex)
+    if not itemID or itemID <= 0 or not qualityIndex or qualityIndex <= 0 then
+        return nil
+    end
+
+    local record = self:GetDBRecord(itemID)
+    if not record then
+        return nil
+    end
+
+    local bestPrice = nil
+    local bestSeen = nil
+    local bestItemLevel = nil
+    local bestLink = nil
+
+    for _, data in pairs(record) do
+        local link = type(data) == "table" and data.Link or nil
+        local price = type(data) == "table" and data.Price or nil
+        local qualityTier = ParseProfessionQualityTier(link)
+        if qualityTier == qualityIndex and price then
+            if not bestPrice or price < bestPrice then
+                bestPrice = price
+                bestSeen = data.LastSeen
+                bestItemLevel = tonumber(data.ItemLevel) or nil
+                bestLink = link
+            end
+        end
+    end
+
+    if not bestPrice then
+        return nil
+    end
+
+    return bestPrice, bestSeen, bestItemLevel, bestLink
+end
+
+function ns:GetStoredTwoQualityPriceInfo(recipeID, qualityIndex, transaction, schematicForm)
+    recipeID = tonumber(recipeID)
+    qualityIndex = tonumber(qualityIndex)
+    if not recipeID or recipeID <= 0 or not qualityIndex or qualityIndex < 1 or qualityIndex > 2 then
+        return nil
+    end
+
+    local qualityItemIDs = C_TradeSkillUI.GetRecipeQualityItemIDs and C_TradeSkillUI.GetRecipeQualityItemIDs(recipeID) or nil
+    local itemID = qualityItemIDs and tonumber(qualityItemIDs[qualityIndex]) or nil
+    if not itemID or itemID <= 0 then
+        return nil
+    end
+
+    local context = self:GetRecipeQualityContext(recipeID, transaction, schematicForm)
+    local entry = context and context.byQualityIndex and context.byQualityIndex[qualityIndex] or nil
+    local link = entry and entry.link or nil
+    local itemLevel = entry and (entry.itemLevel or (entry.link and GetDetailedItemLevelInfo and GetDetailedItemLevelInfo(entry.link) or nil)) or nil
+
+    if link then
+        local exactPrice = self:GetExactPriceForLink(link)
+        if exactPrice then
+            return {
+                itemID = itemID,
+                link = link,
+                price = exactPrice,
+                qualityIndex = qualityIndex,
+                itemLevel = itemLevel,
+            }
+        end
+    end
+
+    local tierPrice, _, tierItemLevel, tierLink = self:GetPriceForProfessionQualityTier(itemID, qualityIndex)
+    if tierPrice then
+        return {
+            itemID = itemID,
+            link = tierLink or link,
+            price = tierPrice,
+            qualityIndex = qualityIndex,
+            itemLevel = tierItemLevel or itemLevel,
+        }
+    end
+
+    if itemLevel then
+        local itemLevelPrice = self:GetPriceForItemLevel(itemID, itemLevel)
+        if itemLevelPrice then
+            return {
+                itemID = itemID,
+                link = link,
+                price = itemLevelPrice,
+                qualityIndex = qualityIndex,
+                itemLevel = itemLevel,
+            }
+        end
+    end
+
+    return nil
+end
+
 local function ParsePositiveNumber(value)
     if type(value) == "number" then
         return value > 0 and value or nil
@@ -388,6 +484,128 @@ local function ParsePositiveNumber(value)
     end
 
     return nil
+end
+
+local function ReadProducedQuantityFromSource(source)
+    if type(source) ~= "table" then
+        return nil
+    end
+
+    local function ReadCandidates(names)
+        for _, name in ipairs(names) do
+            local member = source[name]
+            local value = ParsePositiveNumber(member)
+            if value then
+                return value
+            end
+
+            if type(member) == "function" then
+                local ok, result = pcall(member, source)
+                value = ParsePositiveNumber(ok and result or nil)
+                if value then
+                    return value
+                end
+            end
+        end
+
+        return nil
+    end
+
+    local minQuantity = ReadCandidates({
+        "quantityMin",
+        "minQuantity",
+        "minimumQuantity",
+        "outputQuantityMin",
+        "outputItemQuantityMin",
+        "craftedQuantityMin",
+    })
+    local maxQuantity = ReadCandidates({
+        "quantityMax",
+        "maxQuantity",
+        "maximumQuantity",
+        "outputQuantityMax",
+        "outputItemQuantityMax",
+        "craftedQuantityMax",
+    })
+
+    if minQuantity and maxQuantity then
+        return math.min(minQuantity, maxQuantity)
+    end
+    if minQuantity then
+        return minQuantity
+    end
+
+    local quantity = ReadCandidates({
+        "quantityProduced",
+        "quantity",
+        "outputQuantity",
+        "outputItemQuantity",
+        "numItemsProduced",
+        "quantityCrafted",
+        "craftedQuantity",
+    })
+    if quantity then
+        return quantity
+    end
+
+    if maxQuantity then
+        return maxQuantity
+    end
+
+    return nil
+end
+
+function ns:GetRecipeOutputQuantity(recipeID, transaction, schematicForm)
+    if not recipeID then
+        return 1
+    end
+
+    local recipeInfo = schematicForm and (schematicForm.currentRecipeInfo or (schematicForm.GetRecipeInfo and schematicForm:GetRecipeInfo()) or nil) or nil
+    if not recipeInfo and C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+        recipeInfo = C_TradeSkillUI.GetRecipeInfo(recipeID)
+    end
+
+    local unlockedRecipeLevel = recipeInfo and ParsePositiveNumber(recipeInfo.unlockedRecipeLevel) or nil
+    local isRecraft = recipeInfo and recipeInfo.isRecraft or false
+    local reagentInfo = transaction and transaction.CreateCraftingReagentInfoTbl and transaction:CreateCraftingReagentInfoTbl() or nil
+    local allocationGUID = transaction and transaction.GetAllocationItemGUID and transaction:GetAllocationItemGUID() or nil
+    local qualityOverride = schematicForm and schematicForm.GetOutputOverrideQualityID and schematicForm:GetOutputOverrideQualityID() or nil
+    local outputData = C_TradeSkillUI and C_TradeSkillUI.GetRecipeOutputItemData and C_TradeSkillUI.GetRecipeOutputItemData(recipeID, reagentInfo, allocationGUID, qualityOverride) or nil
+    local operationInfo = transaction and C_TradeSkillUI and C_TradeSkillUI.GetCraftingOperationInfo
+        and C_TradeSkillUI.GetCraftingOperationInfo(recipeID, reagentInfo, allocationGUID, false)
+        or nil
+    local schematic = nil
+    if ProfessionsUtil and ProfessionsUtil.GetRecipeSchematic then
+        schematic = (schematicForm and schematicForm.recipeSchematic)
+            or ProfessionsUtil.GetRecipeSchematic(recipeID, isRecraft, unlockedRecipeLevel)
+    end
+
+    local sources = {}
+    local sourceLabels = {}
+    local function AddSource(label, source)
+        if source ~= nil then
+            sources[#sources + 1] = source
+            sourceLabels[#sourceLabels + 1] = label
+        end
+    end
+
+    AddSource("operationInfo", operationInfo)
+    AddSource("outputData", outputData)
+    AddSource("outputData.outputItemData", outputData and outputData.outputItemData or nil)
+    AddSource("schematic", schematic)
+    AddSource("schematic.outputItem", schematic and schematic.outputItem or nil)
+    AddSource("schematic.outputItemData", schematic and schematic.outputItemData or nil)
+    AddSource("recipeInfo", recipeInfo)
+    for index, source in ipairs(sources) do
+        local quantity = ReadProducedQuantityFromSource(source)
+        if quantity and quantity > 0 then
+            self:DebugRecipeTrace(recipeID, "OutputQuantity selected=%s value=%s", tostring(sourceLabels[index]), FormatDebugValue(quantity))
+            return quantity
+        end
+    end
+
+    self:DebugRecipeTrace(recipeID, "OutputQuantity selected=fallback value=1")
+    return 1
 end
 
 local function GetTooltipDisplayedItemLevel(tooltip)
@@ -970,6 +1188,7 @@ function ns:GetStrictRecipeQualityPrice(entry, qualityMode)
     local exactPrice, exactSeen = nil, nil
     local itemLevelPrice, itemLevelSeen = nil, nil
     local rankedPrice, rankedSeen, rankedItemLevel, rankedLink = nil, nil, nil, nil
+    local tierPrice, tierSeen, tierItemLevel, tierLink = nil, nil, nil, nil
     if entry.link then
         exactPrice, exactSeen = self:GetExactPriceForLink(entry.link)
     end
@@ -977,6 +1196,7 @@ function ns:GetStrictRecipeQualityPrice(entry, qualityMode)
         itemLevelPrice, itemLevelSeen = self:GetPriceForItemLevel(entry.itemID, itemLevel)
     end
     rankedPrice, rankedSeen, rankedItemLevel, rankedLink = self:GetPriceForQualityRank(entry.itemID, entry.qualityIndex)
+    tierPrice, tierSeen, tierItemLevel, tierLink = self:GetPriceForProfessionQualityTier(entry.itemID, entry.qualityIndex)
 
     if self.Settings and self.Settings.debugRecipeTrace and self.Settings.debugRecipeVerbose and self:IsDebugItemTarget(entry.itemID, entry.link) then
         self:Printf(
@@ -995,6 +1215,10 @@ function ns:GetStrictRecipeQualityPrice(entry, qualityMode)
     if qualityMode == 2 then
         if exactPrice then
             return exactPrice, exactSeen, itemLevel, entry.link
+        end
+
+        if tierPrice then
+            return tierPrice, tierSeen, tierItemLevel or itemLevel, tierLink or entry.link
         end
 
         if itemLevelPrice then
@@ -1146,6 +1370,20 @@ function ns:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm, options
         local topMissingText = nil
 
         local function ResolveStrictSale(index)
+            if qualityMode == 2 then
+                local twoQualitySale = self:GetStoredTwoQualityPriceInfo(recipeID, index, transaction, schematicForm)
+                if twoQualitySale and twoQualitySale.price then
+                    self:DebugRecipeTrace(
+                        recipeID,
+                        "ResolveStrictSale q%s two-quality price=%s link=%s",
+                        FormatDebugValue(index),
+                        FormatDebugValue(twoQualitySale.price),
+                        FormatDebugValue(twoQualitySale.link)
+                    )
+                    return twoQualitySale
+                end
+            end
+
             local entry = byQualityIndex and byQualityIndex[index] or nil
             if not entry then
                 self:DebugRecipeTrace(recipeID, "ResolveStrictSale q%s entry=nil", FormatDebugValue(index))
@@ -1530,27 +1768,38 @@ function ns:GetRecipeEconomics(recipeID, transaction, schematicForm, options)
     local saleInfo = self:GetRecipeSalePriceInfo(recipeID, transaction, schematicForm, options)
     local baseSale = saleInfo and saleInfo.base or nil
     local topSale = saleInfo and saleInfo.top or nil
-    local salePrice = baseSale and baseSale.price or nil
+    local outputQuantity = tonumber(options and options.outputQuantityOverride or nil)
+    if not outputQuantity or outputQuantity <= 0 then
+        local outputTransaction = options and options.outputTransaction or transaction
+        local outputSchematicForm = options and options.outputSchematicForm or schematicForm
+        outputQuantity = math.max(1, self:GetRecipeOutputQuantity(recipeID, outputTransaction, outputSchematicForm) or 1)
+    end
+    local unitSalePrice = baseSale and baseSale.price or nil
+    local unitTopSalePrice = topSale and topSale.price or nil
+    local salePrice = unitSalePrice and (unitSalePrice * outputQuantity) or nil
 
     local auctionCutRate = self.Settings and self.Settings.auctionCutRate or 0.05
     local auctionCut = salePrice and math.floor(salePrice * auctionCutRate) or nil
     local netSale = salePrice and (salePrice - auctionCut) or nil
     local profit = netSale and (netSale - totalCost) or nil
     local margin = (profit and totalCost > 0) and (profit / totalCost) or nil
-    local topAuctionCut = topSale and topSale.price and math.floor(topSale.price * auctionCutRate) or nil
-    local topNetSale = topSale and topSale.price and topAuctionCut and (topSale.price - topAuctionCut) or nil
+    local topSalePrice = unitTopSalePrice and (unitTopSalePrice * outputQuantity) or nil
+    local topAuctionCut = topSalePrice and math.floor(topSalePrice * auctionCutRate) or nil
+    local topNetSale = topSalePrice and topAuctionCut and (topSalePrice - topAuctionCut) or nil
     local topProfit = topNetSale and (topNetSale - totalCost) or nil
     local topMargin = (topProfit and totalCost > 0) and (topProfit / totalCost) or nil
-    local hasAnySalePrice = salePrice ~= nil or (topSale and topSale.price ~= nil) or false
+    local hasAnySalePrice = salePrice ~= nil or topSalePrice ~= nil or false
 
     self:DebugRecipeTrace(
         recipeID,
-        "Economics source=%s totalCost=%s sale=%s baseQ=%s topSale=%s topQ=%s hasAny=%s",
+        "Economics source=%s totalCost=%s qty=%s overrideQty=%s sale=%s baseQ=%s topSale=%s topQ=%s hasAny=%s",
         usingTransaction and "selected-transaction" or "baseline",
         FormatDebugValue(totalCost),
+        FormatDebugValue(outputQuantity),
+        FormatDebugValue(options and options.outputQuantityOverride or nil),
         FormatDebugValue(salePrice),
         FormatDebugValue(baseSale and baseSale.qualityIndex or nil),
-        FormatDebugValue(topSale and topSale.price or nil),
+        FormatDebugValue(topSalePrice),
         FormatDebugValue(topSale and topSale.qualityIndex or nil),
         FormatDebugValue(hasAnySalePrice)
     )
@@ -1564,12 +1813,13 @@ function ns:GetRecipeEconomics(recipeID, transaction, schematicForm, options)
         margin = margin,
         outputItemID = (baseSale and baseSale.itemID) or (topSale and topSale.itemID) or nil,
         outputLink = (baseSale and baseSale.link) or (topSale and topSale.link) or nil,
+        outputQuantity = outputQuantity,
         qualityMode = saleInfo and saleInfo.mode or 0,
         qualityBaseIndex = baseSale and baseSale.qualityIndex or (saleInfo and saleInfo.baseDisplayIndex or nil),
         qualityTopIndex = topSale and topSale.qualityIndex or (saleInfo and saleInfo.topDisplayIndex or nil),
         requestedDisplayQualityIndex = saleInfo and saleInfo.requestedDisplayQualityIndex or nil,
         baseSaleStatusText = saleInfo and saleInfo.baseMissingText or nil,
-        topSalePrice = topSale and topSale.price or nil,
+        topSalePrice = topSalePrice,
         topSaleItemID = topSale and topSale.itemID or nil,
         topSaleLink = topSale and topSale.link or nil,
         topAuctionCut = topAuctionCut,
